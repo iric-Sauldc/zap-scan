@@ -13,7 +13,7 @@
 #      --target   https://staging.miapp.com \
 #      --login    https://staging.miapp.com/login \
 #      --user     admin@miapp.com \
-#      --password password \
+#      --password MiPassSegura123 \
 #      --openapi  ./docs/openapi.yaml \
 #      --output   ./reports \
 #      --timeout  120
@@ -199,11 +199,24 @@ class ZAPFullScanner:
         )
 
         # Construir comando Docker
+        # IMPORTANTE: montamos output_dir → /zap/wrk
+        # Los reportes se escriben en /zap/wrk/reports (= output_dir/reports en el host)
         work_dir = str(self.output_dir.resolve())
+
+        # Asegurar permisos de escritura para el usuario zap (uid 1000) del contenedor
+        os.makedirs(work_dir, exist_ok=True)
+        os.makedirs(os.path.join(work_dir, "reports"), exist_ok=True)
+        try:
+            os.chmod(work_dir, 0o777)
+            os.chmod(os.path.join(work_dir, "reports"), 0o777)
+        except Exception:
+            pass  # En algunos sistemas no es necesario
+
         cmd = [
             "docker", "run", "-d",
             "--name", "zap-fullscan",
             "--network", "host",
+            "-u", "zap",
             "-v", f"{work_dir}:/zap/wrk:rw",
             ZAP_IMAGE,
             "zap.sh",
@@ -542,11 +555,92 @@ class ZAPFullScanner:
             except Exception:
                 pass
 
+    # ── Descarga de reporte via HTTP (evita problemas de path Docker) ────────
+    def _download_report(self, endpoint: str, dest_file: Path,
+                         binary: bool = False) -> bool:
+        """
+        Llama a endpoints /OTHER/ de ZAP que devuelven el contenido
+        directamente en el body HTTP — sin depender de paths internos
+        del contenedor Docker.
+        """
+        url = f"{ZAP_BASE_URL}/OTHER/{endpoint}/"
+        try:
+            r = self.session.get(
+                url,
+                params={"apikey": ZAP_API_KEY},
+                timeout=60,
+                stream=True,
+            )
+            r.raise_for_status()
+            mode = "wb" if binary else "w"
+            enc  = None if binary else "utf-8"
+            with open(dest_file, mode, encoding=enc) as f:
+                if binary:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                else:
+                    f.write(r.text)
+            # Verificar que el archivo tiene contenido real
+            size = dest_file.stat().st_size
+            if size < 50:
+                warn(f"  Archivo muy pequeño ({size} bytes): {dest_file.name}")
+                return False
+            ok(f"  {dest_file.name} ({size // 1024} KB)")
+            return True
+        except Exception as e:
+            warn(f"  No se pudo descargar {dest_file.name}: {e}")
+            return False
+
+    def _try_reports_addon(self, report_path: Path, template: str,
+                           filename: str, label: str) -> bool:
+        """
+        Intenta generar reporte con el add-on 'reports' (ZAP 2.12+).
+        Escribe el archivo directamente en el host via Docker cp como fallback.
+        """
+        # Path interno al contenedor donde ZAP escribe
+        container_report_dir = "/zap/wrk/reports"
+        # Nombre sin extensión — ZAP añade la extensión automáticamente
+        base_name = filename.rsplit(".", 1)[0]
+
+        try:
+            result = self._post("reports/action/generate", {
+                "title":       label,
+                "template":    template,
+                "reportDir":   container_report_dir,
+                "reportFile":  base_name,
+                "description": f"DAST Full Scan — {self.target}",
+                "contexts":    "FullScan",
+            })
+
+            # ZAP devuelve la ruta absoluta dentro del contenedor
+            internal_path = result.get("generate", "")
+            if not internal_path:
+                return False
+
+            # Copiar desde el contenedor al host
+            dest = report_path / filename
+            cp_result = subprocess.run(
+                ["docker", "cp",
+                 f"zap-fullscan:{internal_path}",
+                 str(dest)],
+                capture_output=True, text=True
+            )
+            if cp_result.returncode == 0 and dest.exists() and dest.stat().st_size > 50:
+                ok(f"  {filename} ({dest.stat().st_size // 1024} KB) [addon+cp]")
+                return True
+            else:
+                return False
+        except Exception:
+            return False
+
     # ── FASE 7: Recopilar alertas y generar reportes ──────────────────────────
     def collect_and_report(self):
         step(7, 8, "Recopilando alertas y generando reportes")
 
-        # Obtener TODAS las alertas
+        report_path = self.output_dir / "reports"
+        report_path.mkdir(parents=True, exist_ok=True)
+
+        # ── 7a) Obtener TODAS las alertas via API ────────────────────────────
         alerts_data = self._get("alert/view/alerts", {
             "baseurl": self.target,
             "start":   "0",
@@ -561,8 +655,9 @@ class ZAPFullScanner:
             risk = alert.get("risk", "Informational")
             self.by_risk.get(risk, self.by_risk["Informational"]).append(alert)
 
-        # Guardar JSON completo
-        report_path = self.output_dir / "reports"
+        info("Generando reportes ...")
+
+        # ── 7b) JSON — siempre funciona (escrito por el script, no ZAP) ─────
         json_file = report_path / "zap-alerts.json"
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump({
@@ -580,38 +675,54 @@ class ZAPFullScanner:
                     "low":    len(self.by_risk["Low"]),
                     "info":   len(self.by_risk["Informational"]),
                 },
-                "alerts": self.alerts
+                "alerts": self.alerts,
             }, f, indent=2, ensure_ascii=False)
-        ok(f"Reporte JSON: {json_file}")
+        ok(f"  zap-alerts.json ({json_file.stat().st_size // 1024} KB)")
 
-        # Generar reporte HTML via API de ZAP
-        try:
-            self._post("reports/action/generate", {
-                "title":       "ZAP Full Scan Report",
-                "template":    "traditional-html-plus",
-                "reportDir":   "/zap/wrk/reports",
-                "reportFile":  "zap-report-full",
-                "description": f"DAST Full Scan — {self.target}",
-                "contexts":    "FullScan",
-            })
-            ok("Reporte HTML generado")
-        except Exception as e:
-            warn(f"No se pudo generar HTML via API: {e}")
+        # ── 7c) HTML — descarga directa via endpoint HTTP de ZAP ────────────
+        # core/other/htmlreport devuelve el HTML en el body, sin paths Docker
+        html_ok = self._download_report(
+            "core/other/htmlreport",
+            report_path / "zap-report.html"
+        )
+        if not html_ok:
+            # Fallback: add-on reports + docker cp
+            html_ok = self._try_reports_addon(
+                report_path, "traditional-html-plus",
+                "zap-report.html", "ZAP Full Scan HTML"
+            )
 
-        # Reporte SARIF (para GitHub Security)
-        try:
-            self._post("reports/action/generate", {
-                "title":      "ZAP SARIF",
-                "template":   "sarif-json",
-                "reportDir":  "/zap/wrk/reports",
-                "reportFile": "zap-report",
-            })
-            ok("Reporte SARIF generado")
-        except Exception as e:
-            warn(f"SARIF no disponible: {e}")
+        # ── 7d) XML — descarga directa via endpoint HTTP ─────────────────────
+        xml_ok = self._download_report(
+            "core/other/xmlreport",
+            report_path / "zap-report.xml"
+        )
+        if not xml_ok:
+            self._try_reports_addon(
+                report_path, "traditional-xml",
+                "zap-report.xml", "ZAP Full Scan XML"
+            )
 
-        # Generar reporte Markdown custom
+        # ── 7e) SARIF — solo disponible via add-on reports + docker cp ───────
+        self._try_reports_addon(
+            report_path, "sarif-json",
+            "zap-report.sarif", "ZAP SARIF"
+        )
+
+        # ── 7f) Markdown custom — escrito por el script directamente ─────────
         self._generate_markdown_report(report_path)
+
+        # ── 7g) Listar todos los archivos generados ──────────────────────────
+        console.print()
+        files_table = Table(title="📁 Archivos generados", box=box.SIMPLE)
+        files_table.add_column("Archivo",  style="cyan")
+        files_table.add_column("Tamaño",   justify="right")
+        files_table.add_column("Estado",   justify="center")
+        for f in sorted(report_path.iterdir()):
+            size   = f.stat().st_size
+            status = "[green]✔[/green]" if size > 50 else "[red]✘ vacío[/red]"
+            files_table.add_row(f.name, f"{size // 1024} KB", status)
+        console.print(files_table)
 
     def _generate_markdown_report(self, report_dir: Path):
         md_file = report_dir / "zap-report.md"
