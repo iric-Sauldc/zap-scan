@@ -13,7 +13,7 @@
 #      --target   https://staging.miapp.com \
 #      --login    https://staging.miapp.com/login \
 #      --user     admin@miapp.com \
-#      --password MiPassSegura123 \
+#      --password password \
 #      --openapi  ./docs/openapi.yaml \
 #      --output   ./reports \
 #      --timeout  120
