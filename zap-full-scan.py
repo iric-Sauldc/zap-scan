@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # =============================================================================
-#  ZAP Full Scan Automation — iric-Sauldc
-#  Autor   : github.com/iric-Sauldc
-#  Versión : 2.0 (2026)
+#  ZAP Full Scan Automation — github.com/iric-Sauldc
+#  Versión : 3.0 (2026) — Reportes 100% vía HTTP, sin paths Docker
 #  Req.    : Python 3.10+, Docker, ZAP 2.17+
 #
 #  Uso rápido:
@@ -13,7 +12,7 @@
 #      --target   https://staging.miapp.com \
 #      --login    https://staging.miapp.com/login \
 #      --user     admin@miapp.com \
-#      --password MiPassSegura123 \
+#      --password "password123" \
 #      --openapi  ./docs/openapi.yaml \
 #      --output   ./reports \
 #      --timeout  120
@@ -39,10 +38,8 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-# ── Consola global con colores ────────────────────────────────────────────────
 console = Console()
 
-# ── Banner ────────────────────────────────────────────────────────────────────
 BANNER = """
 ███████╗ █████╗ ██████╗     ███████╗ ██████╗ █████╗ ███╗   ██╗
 ╚══███╔╝██╔══██╗██╔══██╗    ██╔════╝██╔════╝██╔══██╗████╗  ██║
@@ -50,168 +47,144 @@ BANNER = """
  ███╔╝  ██╔══██║██╔═══╝     ╚════██║██║     ██╔══██║██║╚██╗██║
 ███████╗██║  ██║██║         ███████║╚██████╗██║  ██║██║ ╚████║
 ╚══════╝╚═╝  ╚═╝╚═╝         ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝
-        Full DAST Automation // github.com/iric-Sauldc
+   Full DAST Automation v3.0 // github.com/iric-Sauldc
 """
 
-# ── Configuración ZAP ─────────────────────────────────────────────────────────
 ZAP_IMAGE    = "ghcr.io/zaproxy/zaproxy:stable"
 ZAP_PORT     = 8090
-ZAP_API_KEY  = "zap-fullscan-secret-key-2026"
-ZAP_BASE_URL = f"http://localhost:{ZAP_PORT}"
-ZAP_TIMEOUT  = 30          # segundos para requests a la API de ZAP
+ZAP_API_KEY  = "zap-fullscan-key-2026"
+ZAP_BASE     = f"http://localhost:{ZAP_PORT}"
+ZAP_TIMEOUT  = 30
 
-# Add-ons esenciales para escaneo completo
 REQUIRED_ADDONS = [
-    "ascanrules",           # Reglas escaneo activo (obligatorio)
-    "pscanrules",           # Reglas escaneo pasivo (obligatorio)
-    "ascanrulesAlpha",      # Reglas alpha (experimental pero potente)
-    "pscanrulesAlpha",      # Reglas pasivas alpha
-    "openapi",              # Soporte OpenAPI/Swagger
-    "graphql",              # Soporte GraphQL
-    "soap",                 # Soporte SOAP/WSDL
-    "authhelper",           # Helper de autenticación avanzada
-    "automation",           # Automation Framework
-    "reports",              # Generador de reportes
-    "technology-detection", # Detección de tecnologías (Wappalyzer)
-    "advanced-sqlinjection-scanner",  # SQLi avanzado
-    "revisit",              # Re-escaneo de URLs
+    "ascanrules", "pscanrules",
+    "ascanrulesAlpha", "pscanrulesAlpha",
+    "openapi", "graphql", "soap",
+    "authhelper", "reports",
+    "technology-detection",
+    "advanced-sqlinjection-scanner",
 ]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def log(msg: str, style: str = "white"):
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(f"[dim]{ts}[/dim] {msg}", style=style)
-
-def ok(msg: str):   log(f"[bold green]✔[/bold green] {msg}")
-def err(msg: str):  log(f"[bold red]✘[/bold red]  {msg}", "red")
-def warn(msg: str): log(f"[bold yellow]⚠[/bold yellow]  {msg}", "yellow")
-def info(msg: str): log(f"[bold cyan]ℹ[/bold cyan]  {msg}")
-def step(n: int, total: int, msg: str):
-    console.print(f"\n[bold magenta]── FASE {n}/{total}: {msg} ──[/bold magenta]")
+# ── Helpers de log ────────────────────────────────────────────────────────────
+def _ts(): return datetime.now().strftime("%H:%M:%S")
+def ok(m):   console.print(f"[dim]{_ts()}[/dim] [bold green]✔[/bold green] {m}")
+def err(m):  console.print(f"[dim]{_ts()}[/dim] [bold red]✘[/bold red]  {m}", style="red")
+def warn(m): console.print(f"[dim]{_ts()}[/dim] [bold yellow]⚠[/bold yellow]  {m}", style="yellow")
+def info(m): console.print(f"[dim]{_ts()}[/dim] [bold cyan]ℹ[/bold cyan]  {m}")
+def step(n, t, m): console.print(f"\n[bold magenta]── FASE {n}/{t}: {m} ──[/bold magenta]")
+def dbg(m):  console.print(f"[dim]{_ts()} DEBUG: {m}[/dim]")
 
 
 # =============================================================================
-#  CLASE PRINCIPAL
-# =============================================================================
-class ZAPFullScanner:
+class ZAPScanner:
+
     def __init__(self, args):
         self.target      = args.target.rstrip("/")
         self.login_url   = args.login or f"{self.target}/login"
         self.username    = args.user
         self.password    = args.password
         self.openapi     = args.openapi
-        self.output_dir  = Path(args.output)
+        self.output_dir  = Path(args.output).resolve()
+        self.report_dir  = self.output_dir / "reports"
         self.timeout_min = args.timeout
-        self.zap_host    = args.zap_host
         self.no_docker   = args.no_docker
         self.threads     = args.threads
+        self.keep        = args.keep          # ← NO borrar contenedor al final
         self.container_id: Optional[str] = None
-        self.session      = requests.Session()
-        self.session.headers["X-ZAP-API-Key"] = ZAP_API_KEY
-        self.scan_start   = datetime.now()
+        self.ctx_id      = "1"
+        self.user_id     = None
         self.alerts: list = []
+        self.by_risk: dict = {}
+        self.total_urls  = 0
+        self.scan_start  = datetime.now()
+        # Sesión HTTP para todas las llamadas a ZAP API
+        self.s = requests.Session()
+        self.s.headers["X-ZAP-API-Key"] = ZAP_API_KEY
 
-    # ── Utilidades de API ─────────────────────────────────────────────────────
-    def _get(self, endpoint: str, params: dict = {}) -> dict:
-        url = f"{ZAP_BASE_URL}/JSON/{endpoint}/"
-        params["apikey"] = ZAP_API_KEY
-        try:
-            r = self.session.get(url, params=params, timeout=ZAP_TIMEOUT)
-            r.raise_for_status()
-            return r.json()
-        except requests.exceptions.ConnectionError:
-            raise ConnectionError(f"No se puede conectar a ZAP en {ZAP_BASE_URL}")
-        except Exception as e:
-            raise RuntimeError(f"Error en ZAP API [{endpoint}]: {e}")
+    # =========================================================================
+    # API helpers
+    # =========================================================================
+    def _get(self, path: str, params: dict = None) -> dict:
+        p = {"apikey": ZAP_API_KEY}
+        if params:
+            p.update(params)
+        r = self.s.get(f"{ZAP_BASE}/JSON/{path}/", params=p, timeout=ZAP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
 
-    def _post(self, endpoint: str, data: dict = {}) -> dict:
-        url = f"{ZAP_BASE_URL}/JSON/{endpoint}/"
-        data["apikey"] = ZAP_API_KEY
-        try:
-            r = self.session.post(url, data=data, timeout=ZAP_TIMEOUT)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            raise RuntimeError(f"Error en ZAP API POST [{endpoint}]: {e}")
+    def _post(self, path: str, data: dict = None) -> dict:
+        d = {"apikey": ZAP_API_KEY}
+        if data:
+            d.update(data)
+        r = self.s.post(f"{ZAP_BASE}/JSON/{path}/", data=d, timeout=ZAP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
 
-    def _wait_for_scan(self, scan_id: str, endpoint_status: str,
-                       label: str, max_minutes: int):
-        """Espera a que un escaneo (spider/activo) llegue al 100%."""
-        with Progress(
-            SpinnerColumn(),
-            TextColumn(f"[cyan]{label}[/cyan]"),
-            BarColumn(bar_width=40),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("", total=100)
-            deadline = time.time() + max_minutes * 60
+    def _other_get(self, path: str, params: dict = None) -> requests.Response:
+        """Llama a /OTHER/ endpoints que devuelven contenido binario/texto."""
+        p = {"apikey": ZAP_API_KEY}
+        if params:
+            p.update(params)
+        r = self.s.get(f"{ZAP_BASE}/OTHER/{path}/", params=p, timeout=120, stream=True)
+        r.raise_for_status()
+        return r
+
+    def _wait_scan(self, scan_id: str, status_path: str, label: str, max_min: int):
+        with Progress(SpinnerColumn(),
+                      TextColumn(f"[cyan]{label}[/cyan]"),
+                      BarColumn(bar_width=40),
+                      TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                      TimeElapsedColumn(), console=console) as prog:
+            task = prog.add_task("", total=100)
+            deadline = time.time() + max_min * 60
             while time.time() < deadline:
                 try:
-                    data = self._get(endpoint_status, {"scanId": scan_id})
-                    pct  = int(data.get("status", 0))
-                    progress.update(task, completed=pct)
+                    pct = int(self._get(status_path, {"scanId": scan_id}).get("status", 0))
+                    prog.update(task, completed=pct)
                     if pct >= 100:
                         break
                 except Exception:
                     pass
                 time.sleep(3)
-            progress.update(task, completed=100)
+            prog.update(task, completed=100)
 
-    # ── FASE 0: Preparación del entorno ───────────────────────────────────────
+    # =========================================================================
+    # FASE 0 — Preparar directorios
+    # =========================================================================
     def prepare(self):
         step(0, 8, "Preparación del entorno")
-
-        # Crear directorios de salida
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        (self.output_dir / "reports").mkdir(exist_ok=True)
-        info(f"Directorio de salida: {self.output_dir.resolve()}")
-
-        # Verificar Docker
-        if not self.no_docker:
-            if not shutil.which("docker"):
-                err("Docker no encontrado. Instálalo o usa --no-docker con ZAP ya corriendo.")
-                sys.exit(1)
-            ok("Docker disponible")
-
-        # Verificar conectividad al target
-        info(f"Verificando acceso a {self.target} ...")
+        self.report_dir.mkdir(parents=True, exist_ok=True)
         try:
-            r = requests.get(self.target, timeout=15, verify=False)
-            ok(f"Target accesible (HTTP {r.status_code})")
-        except Exception as e:
-            warn(f"Target no responde: {e} — continuando de todas formas")
+            os.chmod(str(self.output_dir), 0o777)
+            os.chmod(str(self.report_dir), 0o777)
+        except Exception:
+            pass
+        ok(f"Directorio de reportes: {self.report_dir}")
 
-    # ── FASE 1: Levantar ZAP en Docker ────────────────────────────────────────
+        if not self.no_docker and not shutil.which("docker"):
+            err("Docker no encontrado.")
+            sys.exit(1)
+        ok("Docker disponible")
+
+        try:
+            r = requests.get(self.target, timeout=10, verify=False)
+            ok(f"Target accesible — HTTP {r.status_code}")
+        except Exception as e:
+            warn(f"Target no responde: {e}")
+
+    # =========================================================================
+    # FASE 1 — Levantar ZAP en Docker
+    # =========================================================================
     def start_zap(self):
         step(1, 8, "Iniciando ZAP")
-
         if self.no_docker:
-            info("Modo --no-docker: asumiendo ZAP corriendo en localhost")
+            info("Modo --no-docker activo")
             self._wait_zap_ready()
             return
 
-        # Detener contenedor previo si existe
-        subprocess.run(
-            ["docker", "rm", "-f", "zap-fullscan"],
-            capture_output=True
-        )
+        subprocess.run(["docker", "rm", "-f", "zap-fullscan"], capture_output=True)
 
-        # Construir comando Docker
-        # IMPORTANTE: montamos output_dir → /zap/wrk
-        # Los reportes se escriben en /zap/wrk/reports (= output_dir/reports en el host)
-        work_dir = str(self.output_dir.resolve())
-
-        # Asegurar permisos de escritura para el usuario zap (uid 1000) del contenedor
-        os.makedirs(work_dir, exist_ok=True)
-        os.makedirs(os.path.join(work_dir, "reports"), exist_ok=True)
-        try:
-            os.chmod(work_dir, 0o777)
-            os.chmod(os.path.join(work_dir, "reports"), 0o777)
-        except Exception:
-            pass  # En algunos sistemas no es necesario
-
+        work_dir = str(self.output_dir)
         cmd = [
             "docker", "run", "-d",
             "--name", "zap-fullscan",
@@ -226,59 +199,53 @@ class ZAPFullScanner:
             "-config", "api.addrs.addr.name=.*",
             "-config", "api.addrs.addr.regex=true",
             "-config", f"api.key={ZAP_API_KEY}",
-            "-config", "connection.timeoutInSecs=60",
+            "-config", "connection.timeoutInSecs=120",
             "-config", "scanner.maxScanDurationInMins=0",
+            "-config", "api.disablekey=false",
         ]
-
-        info(f"Pulling imagen ZAP: {ZAP_IMAGE} ...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            err(f"Error iniciando Docker: {result.stderr}")
+            err(f"Docker error: {result.stderr.strip()}")
             sys.exit(1)
-
         self.container_id = result.stdout.strip()[:12]
-        ok(f"Contenedor ZAP iniciado: {self.container_id}")
+        ok(f"Contenedor iniciado: {self.container_id}")
         self._wait_zap_ready()
 
-    def _wait_zap_ready(self, max_wait: int = 120):
-        info("Esperando que ZAP esté listo ...")
+    def _wait_zap_ready(self, max_wait: int = 180):
+        info("Esperando ZAP ...")
         deadline = time.time() + max_wait
         with Progress(SpinnerColumn(), TextColumn("[cyan]Iniciando ZAP...[/cyan]"),
                       TimeElapsedColumn(), console=console) as p:
             p.add_task("")
             while time.time() < deadline:
                 try:
-                    data = self._get("core/view/version")
-                    ver  = data.get("version", "?")
-                    ok(f"ZAP listo — versión {ver}")
+                    ver = self._get("core/view/version").get("version", "?")
+                    ok(f"ZAP listo — v{ver}")
                     return
                 except Exception:
-                    time.sleep(2)
-        err("ZAP no respondió en el tiempo esperado. Revisa Docker.")
-        self.cleanup()
+                    time.sleep(3)
+        err("ZAP no respondió. Abortando.")
         sys.exit(1)
 
-    # ── FASE 2: Instalar add-ons ──────────────────────────────────────────────
+    # =========================================================================
+    # FASE 2 — Instalar add-ons
+    # =========================================================================
     def install_addons(self):
-        step(2, 8, "Instalando add-ons")
-
-        # Obtener add-ons instalados
-        try:
-            installed_data = self._get("autoupdate/view/installedAddons")
-            installed = {
-                a.get("id") for a in installed_data.get("installedAddons", [])
-            }
-        except Exception:
-            installed = set()
-
-        # Actualizar los existentes primero
+        step(2, 8, "Instalando / actualizando add-ons")
         try:
             self._post("autoupdate/action/updateAllAddons")
             ok("Add-ons actualizados")
         except Exception:
-            warn("No se pudo actualizar add-ons (¿sin internet?)")
+            warn("No se pudo actualizar add-ons")
 
-        # Instalar los faltantes
+        try:
+            installed = {
+                a.get("id")
+                for a in self._get("autoupdate/view/installedAddons").get("installedAddons", [])
+            }
+        except Exception:
+            installed = set()
+
         for addon in REQUIRED_ADDONS:
             if addon not in installed:
                 try:
@@ -289,57 +256,43 @@ class ZAPFullScanner:
                     warn(f"  No se pudo instalar {addon}: {e}")
             else:
                 info(f"  Ya instalado: {addon}")
+        time.sleep(4)
 
-        # Pequeña pausa para que los add-ons carguen
-        time.sleep(3)
-
-    # ── FASE 3: Configurar contexto y autenticación ───────────────────────────
+    # =========================================================================
+    # FASE 3 — Configurar contexto y autenticación
+    # =========================================================================
     def configure_context(self):
         step(3, 8, "Configurando contexto y autenticación")
-
-        # Crear contexto
         ctx = self._post("context/action/newContext", {"contextName": "FullScan"})
         self.ctx_id = ctx.get("contextId", "1")
 
-        # Incluir el target en scope
         self._post("context/action/includeInContext", {
             "contextName": "FullScan",
             "regex": f"{re.escape(self.target)}.*"
         })
+        for pat in [".*logout.*", ".*signout.*", ".*delete.*", ".*destroy.*",
+                    r".*\.png$", r".*\.jpg$", r".*\.css$", r".*\.woff.*"]:
+            try:
+                self._post("context/action/excludeFromContext",
+                           {"contextName": "FullScan", "regex": pat})
+            except Exception:
+                pass
+        ok(f"Contexto creado (ID: {self.ctx_id})")
 
-        # Excluir rutas peligrosas
-        dangerous = [
-            ".*logout.*", ".*signout.*", ".*delete.*", ".*remove.*",
-            ".*destroy.*", ".*reset-password.*", ".*unsubscribe.*",
-            r".*\.png$", r".*\.jpg$", r".*\.css$", r".*\.woff.*",
-        ]
-        for pattern in dangerous:
-            self._post("context/action/excludeFromContext", {
-                "contextName": "FullScan",
-                "regex": pattern
-            })
-        ok(f"Contexto creado (ID: {self.ctx_id}) con {len(dangerous)} exclusiones")
-
-        # Configurar autenticación si hay credenciales
         if self.username and self.password:
             self._setup_auth()
         else:
-            warn("Sin credenciales — escaneo solo en modo no autenticado")
+            warn("Sin credenciales — escaneo no autenticado")
 
     def _setup_auth(self):
-        info("Configurando autenticación Browser-Based ...")
+        info("Configurando autenticación browser-based ...")
         try:
-            # Método browser-based (el más robusto para apps modernas)
             self._post("authentication/action/setAuthenticationMethod", {
                 "contextId": self.ctx_id,
                 "authMethodName": "browserBasedAuthentication",
-                "authMethodConfigParams": (
-                    f"loginPageUrl={self.login_url}"
-                    f"&loginPageWait=5"
-                    f"&browserId=firefox-headless"
-                )
+                "authMethodConfigParams":
+                    f"loginPageUrl={self.login_url}&loginPageWait=5&browserId=firefox-headless"
             })
-            # Configurar verificación de sesión
             self._post("authentication/action/setLoggedInIndicator", {
                 "contextId": self.ctx_id,
                 "loggedInIndicatorRegex": r"\Qdashboard\E|\Qprofile\E|\Qwelcome\E"
@@ -348,536 +301,437 @@ class ZAPFullScanner:
                 "contextId": self.ctx_id,
                 "loggedOutIndicatorRegex": r"\Qlogin\E|\Qsign in\E|\Qunauthorized\E"
             })
-            # Manejo de sesión por cookie
             self._post("sessionManagement/action/setSessionManagementMethod", {
                 "contextId": self.ctx_id,
                 "methodName": "cookieBasedSessionManagement"
             })
-            # Crear usuario
-            user = self._post("users/action/newUser", {
-                "contextId": self.ctx_id,
-                "name": "scan-user"
-            })
+            user = self._post("users/action/newUser",
+                              {"contextId": self.ctx_id, "name": "scan-user"})
             self.user_id = user.get("userId", "0")
             self._post("users/action/setAuthenticationCredentials", {
                 "contextId": self.ctx_id,
-                "userId":    self.user_id,
-                "authCredentialsConfigParams": (
+                "userId": self.user_id,
+                "authCredentialsConfigParams":
                     f"username={self.username}&password={self.password}"
-                )
             })
-            self._post("users/action/setUserEnabled", {
-                "contextId": self.ctx_id,
-                "userId":    self.user_id,
-                "enabled":   "true"
-            })
-            self._post("forcedUser/action/setForcedUser", {
-                "contextId": self.ctx_id,
-                "userId":    self.user_id
-            })
-            self._post("forcedUser/action/setForcedUserModeEnabled", {
-                "boolean": "true"
-            })
-            ok(f"Autenticación configurada para: {self.username}")
+            self._post("users/action/setUserEnabled",
+                       {"contextId": self.ctx_id, "userId": self.user_id, "enabled": "true"})
+            self._post("forcedUser/action/setForcedUser",
+                       {"contextId": self.ctx_id, "userId": self.user_id})
+            self._post("forcedUser/action/setForcedUserModeEnabled", {"boolean": "true"})
+            ok(f"Autenticación configurada: {self.username}")
         except Exception as e:
-            warn(f"No se pudo configurar autenticación avanzada: {e}")
-            warn("Continuando sin autenticación ...")
+            warn(f"Auth no configurada: {e}")
             self.user_id = None
 
-    # ── FASE 4: Importar API Spec (OpenAPI/GraphQL) ───────────────────────────
+    # =========================================================================
+    # FASE 4 — Importar API spec
+    # =========================================================================
     def import_api_spec(self):
         step(4, 8, "Importando definición de API")
         if self.openapi and Path(self.openapi).exists():
             try:
-                self._post("openapi/action/importFile", {
-                    "file":      self.openapi,
-                    "target":    self.target,
-                    "contextId": self.ctx_id
-                })
-                ok(f"OpenAPI spec importado: {self.openapi}")
+                self._post("openapi/action/importFile",
+                           {"file": self.openapi, "target": self.target,
+                            "contextId": self.ctx_id})
+                ok(f"OpenAPI importado: {self.openapi}")
+                return
             except Exception as e:
-                warn(f"No se pudo importar OpenAPI spec: {e}")
-        else:
-            # Intentar descubrir OpenAPI desde URL común
-            for spec_path in ["/openapi.json", "/api-docs", "/swagger.json", "/v1/openapi.json"]:
-                spec_url = f"{self.target}{spec_path}"
-                try:
-                    r = requests.get(spec_url, timeout=5, verify=False)
-                    if r.status_code == 200 and "openapi" in r.text.lower():
-                        self._post("openapi/action/importUrl", {
-                            "url":       spec_url,
-                            "contextId": self.ctx_id
-                        })
-                        ok(f"OpenAPI spec auto-descubierto en: {spec_url}")
-                        break
-                except Exception:
-                    continue
-            else:
-                info("No se encontró OpenAPI spec — escaneo por crawl únicamente")
+                warn(f"No se pudo importar archivo OpenAPI: {e}")
 
-    # ── FASE 5: Spider + AJAX Spider ─────────────────────────────────────────
+        for path in ["/openapi.json", "/api-docs", "/swagger.json", "/v1/openapi.json"]:
+            url = f"{self.target}{path}"
+            try:
+                r = requests.get(url, timeout=5, verify=False)
+                if r.status_code == 200 and "openapi" in r.text.lower():
+                    self._post("openapi/action/importUrl",
+                               {"url": url, "contextId": self.ctx_id})
+                    ok(f"OpenAPI auto-descubierto: {url}")
+                    return
+            except Exception:
+                continue
+        info("No se encontró OpenAPI spec — crawl único")
+
+    # =========================================================================
+    # FASE 5 — Spider + AJAX Spider + Passive Scan
+    # =========================================================================
     def run_spider(self):
-        step(5, 8, "Descubrimiento de URLs (Spider + AJAX)")
+        step(5, 8, "Descubrimiento de URLs")
 
-        # 5a) Spider tradicional
-        info("Iniciando Spider tradicional ...")
-        spider = self._post("spider/action/scan", {
-            "url":             self.target,
-            "contextName":     "FullScan",
-            "recurse":         "true",
-            "subtreeOnly":     "false",
-            "maxChildren":     "0",
+        info("Spider tradicional ...")
+        sp = self._post("spider/action/scan", {
+            "url": self.target, "contextName": "FullScan",
+            "recurse": "true", "maxChildren": "0",
         })
-        spider_id = spider.get("scan", "0")
-        self._wait_for_scan(spider_id, "spider/view/status",
-                            "Spider tradicional", max_minutes=25)
-        urls = self._get("spider/view/results", {"scanId": spider_id})
-        spider_count = len(urls.get("results", []))
-        ok(f"Spider tradicional completado — {spider_count} URLs descubiertas")
+        self._wait_scan(sp.get("scan", "0"), "spider/view/status",
+                        "Spider", max_min=25)
+        sp_urls = len(self._get("spider/view/results",
+                                {"scanId": sp.get("scan", "0")}).get("results", []))
+        ok(f"Spider: {sp_urls} URLs")
 
-        # 5b) AJAX Spider (para SPAs y JavaScript)
-        info("Iniciando AJAX Spider (headless browser) ...")
+        info("AJAX Spider (headless) ...")
         self._post("ajaxSpider/action/scan", {
-            "url":         self.target,
-            "contextName": "FullScan",
-            "subtreeOnly": "false",
+            "url": self.target, "contextName": "FullScan", "subtreeOnly": "false",
         })
-        # AJAX Spider no devuelve scan_id, usa estado distinto
-        with Progress(SpinnerColumn(),
-                      TextColumn("[cyan]AJAX Spider corriendo...[/cyan]"),
+        with Progress(SpinnerColumn(), TextColumn("[cyan]AJAX Spider...[/cyan]"),
                       TimeElapsedColumn(), console=console) as p:
             p.add_task("")
             deadline = time.time() + 25 * 60
             while time.time() < deadline:
                 try:
-                    status = self._get("ajaxSpider/view/status")
-                    if status.get("status") == "stopped":
+                    if self._get("ajaxSpider/view/status").get("status") == "stopped":
                         break
                 except Exception:
                     pass
                 time.sleep(5)
+        ajax_urls = len(self._get("ajaxSpider/view/results").get("results", []))
+        ok(f"AJAX Spider: {ajax_urls} URLs adicionales")
+        self.total_urls = sp_urls + ajax_urls
 
-        ajax_urls = self._get("ajaxSpider/view/results")
-        ajax_count = len(ajax_urls.get("results", []))
-        ok(f"AJAX Spider completado — {ajax_count} URLs adicionales")
-        self.total_urls = spider_count + ajax_count
-
-        # Escaneo pasivo del tráfico capturado
-        info("Ejecutando escaneo pasivo sobre tráfico capturado ...")
+        info("Escaneo pasivo ...")
         self._post("pscan/action/enableAllScanners")
         self._post("pscan/action/setMaxAlertsPerRule", {"maxAlerts": "10"})
         deadline = time.time() + 10 * 60
-        with Progress(SpinnerColumn(),
-                      TextColumn("[cyan]Escaneo pasivo...[/cyan]"),
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Pasivo...[/cyan]"),
                       TimeElapsedColumn(), console=console) as p:
             p.add_task("")
             while time.time() < deadline:
                 try:
-                    rec = self._get("pscan/view/recordsToScan")
-                    remaining = int(rec.get("recordsToScan", 0))
-                    if remaining == 0:
+                    if int(self._get("pscan/view/recordsToScan")
+                           .get("recordsToScan", 0)) == 0:
                         break
                 except Exception:
                     pass
                 time.sleep(3)
         ok("Escaneo pasivo completado")
 
-    # ── FASE 6: Escaneo activo completo ──────────────────────────────────────
+    # =========================================================================
+    # FASE 6 — Escaneo activo
+    # =========================================================================
     def run_active_scan(self):
-        step(6, 8, "Escaneo activo (OWASP Top 10 2025 + más)")
+        step(6, 8, "Escaneo activo — OWASP Top 10 + 2025")
 
-        # Configurar política máxima: Threshold LOW, Strength HIGH
-        self._configure_scan_policy()
-
-        # Habilitar TODOS los scanners activos
-        self._post("ascan/action/enableAllScanners", {"policyName": "FullPolicy"})
-
-        # Strength INSANE para las categorías críticas
-        critical_rules = [
-            "40018",  # SQL Injection
-            "40012",  # XSS Reflected
-            "40014",  # XSS Persistent
-            "90020",  # Remote OS Command Injection
-            "40046",  # SSRF
-            "90023",  # XXE
-            "90035",  # SSTI
-            "6",      # Path Traversal
-        ]
-        for rule_id in critical_rules:
-            try:
-                self._post("ascan/action/setScannerAttackStrength", {
-                    "id":       rule_id,
-                    "strength": "INSANE",
-                    "policyName": "FullPolicy"
-                })
-                self._post("ascan/action/setScannerAlertThreshold", {
-                    "id":        rule_id,
-                    "threshold": "LOW",
-                    "policyName": "FullPolicy"
-                })
-            except Exception:
-                pass
-
-        # Lanzar escaneo activo
-        scan_params = {
-            "url":          self.target,
-            "contextId":    self.ctx_id,
-            "recurse":      "true",
-            "scanPolicyName": "FullPolicy",
-            "method":       "",
-            "postData":     "",
-        }
-        if hasattr(self, "user_id") and self.user_id:
-            scan_params["userId"] = self.user_id
-
-        scan = self._post("ascan/action/scan", scan_params)
-        scan_id = scan.get("scan", "0")
-
-        self._wait_for_scan(scan_id, "ascan/view/status",
-                            "Escaneo activo", max_minutes=self.timeout_min)
-        ok(f"Escaneo activo completado (ID: {scan_id})")
-
-    def _configure_scan_policy(self):
+        # Crear política de máxima cobertura
         try:
             self._post("ascan/action/addScanPolicy", {
                 "scanPolicyName": "FullPolicy",
                 "alertThreshold": "LOW",
-                "attackStrength": "HIGH"
+                "attackStrength": "HIGH",
             })
         except Exception:
-            # La política ya existe, actualizar
             try:
                 self._post("ascan/action/updateScanPolicy", {
                     "scanPolicyName": "FullPolicy",
                     "alertThreshold": "LOW",
-                    "attackStrength": "HIGH"
+                    "attackStrength": "HIGH",
                 })
             except Exception:
                 pass
 
-    # ── Descarga de reporte via HTTP (evita problemas de path Docker) ────────
-    def _download_report(self, endpoint: str, dest_file: Path,
-                         binary: bool = False) -> bool:
-        """
-        Llama a endpoints /OTHER/ de ZAP que devuelven el contenido
-        directamente en el body HTTP — sin depender de paths internos
-        del contenedor Docker.
-        """
-        url = f"{ZAP_BASE_URL}/OTHER/{endpoint}/"
+        self._post("ascan/action/enableAllScanners", {"policyName": "FullPolicy"})
+
+        # Fuerza INSANE en reglas críticas
+        for rid in ["40018", "40012", "40014", "90020", "40046", "90023", "90035", "6"]:
+            try:
+                self._post("ascan/action/setScannerAttackStrength",
+                           {"id": rid, "strength": "INSANE", "policyName": "FullPolicy"})
+                self._post("ascan/action/setScannerAlertThreshold",
+                           {"id": rid, "threshold": "LOW", "policyName": "FullPolicy"})
+            except Exception:
+                pass
+
+        params = {
+            "url": self.target,
+            "contextId": self.ctx_id,
+            "recurse": "true",
+            "scanPolicyName": "FullPolicy",
+        }
+        if self.user_id:
+            params["userId"] = self.user_id
+
+        scan = self._post("ascan/action/scan", params)
+        scan_id = scan.get("scan", "0")
+        self._wait_scan(scan_id, "ascan/view/status",
+                        "Escaneo activo", max_min=self.timeout_min)
+        ok(f"Escaneo activo completado (ID: {scan_id})")
+
+    # =========================================================================
+    # FASE 7 — Reportes (100% vía HTTP, sin paths Docker)
+    # =========================================================================
+    def collect_and_report(self):
+        step(7, 8, "Generando reportes")
+
+        # ── Recopilar alertas ─────────────────────────────────────────────────
+        alerts_raw = self._get("alert/view/alerts", {
+            "baseurl": self.target, "start": "0", "count": "99999",
+        })
+        self.alerts = alerts_raw.get("alerts", [])
+        ok(f"Alertas totales: {len(self.alerts)}")
+
+        self.by_risk = {"High": [], "Medium": [], "Low": [], "Informational": []}
+        for a in self.alerts:
+            self.by_risk.setdefault(a.get("risk", "Informational"), []).append(a)
+
+        info("Escribiendo reportes ...")
+        generated = {}
+
+        # ── 1) JSON — escrito directamente por Python ─────────────────────────
+        json_path = self.report_dir / "zap-alerts.json"
+        payload = {
+            "scan_info": {
+                "target":     self.target,
+                "start_time": self.scan_start.isoformat(),
+                "end_time":   datetime.now().isoformat(),
+                "total_urls": self.total_urls,
+                "author":     "github.com/iric-Sauldc",
+            },
+            "summary": {
+                "total":  len(self.alerts),
+                "high":   len(self.by_risk["High"]),
+                "medium": len(self.by_risk["Medium"]),
+                "low":    len(self.by_risk["Low"]),
+                "info":   len(self.by_risk["Informational"]),
+            },
+            "alerts": self.alerts,
+        }
+        json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        generated["JSON"] = json_path
+
+        # ── 2) HTML — /OTHER/core/other/htmlreport/ devuelve HTML en el body ──
+        #    Es el endpoint más estable de ZAP, existe desde v2.4
+        html_path = self.report_dir / "zap-report.html"
         try:
-            r = self.session.get(
-                url,
-                params={"apikey": ZAP_API_KEY},
-                timeout=60,
-                stream=True,
+            resp = self._other_get("core/other/htmlreport")
+            html_path.write_bytes(resp.content)
+            if html_path.stat().st_size > 200:
+                generated["HTML"] = html_path
+            else:
+                warn("  HTML vacío, intentando con add-on reports ...")
+                raise ValueError("vacío")
+        except Exception:
+            # Fallback: add-on reports → docker cp
+            html_path = self._addon_report_via_cp(
+                "traditional-html-plus", "zap-report-html", ".html"
             )
-            r.raise_for_status()
-            mode = "wb" if binary else "w"
-            enc  = None if binary else "utf-8"
-            with open(dest_file, mode, encoding=enc) as f:
-                if binary:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                else:
-                    f.write(r.text)
-            # Verificar que el archivo tiene contenido real
-            size = dest_file.stat().st_size
-            if size < 50:
-                warn(f"  Archivo muy pequeño ({size} bytes): {dest_file.name}")
-                return False
-            ok(f"  {dest_file.name} ({size // 1024} KB)")
-            return True
-        except Exception as e:
-            warn(f"  No se pudo descargar {dest_file.name}: {e}")
-            return False
+            if html_path:
+                generated["HTML"] = html_path
 
-    def _try_reports_addon(self, report_path: Path, template: str,
-                           filename: str, label: str) -> bool:
-        """
-        Intenta generar reporte con el add-on 'reports' (ZAP 2.12+).
-        Escribe el archivo directamente en el host via Docker cp como fallback.
-        """
-        # Path interno al contenedor donde ZAP escribe
-        container_report_dir = "/zap/wrk/reports"
-        # Nombre sin extensión — ZAP añade la extensión automáticamente
-        base_name = filename.rsplit(".", 1)[0]
-
+        # ── 3) XML — /OTHER/core/other/xmlreport/ ─────────────────────────────
+        xml_path = self.report_dir / "zap-report.xml"
         try:
+            resp = self._other_get("core/other/xmlreport")
+            xml_path.write_bytes(resp.content)
+            if xml_path.stat().st_size > 200:
+                generated["XML"] = xml_path
+            else:
+                raise ValueError("vacío")
+        except Exception:
+            xml_path = self._addon_report_via_cp(
+                "traditional-xml", "zap-report-xml", ".xml"
+            )
+            if xml_path:
+                generated["XML"] = xml_path
+
+        # ── 4) SARIF — solo disponible vía add-on reports + docker cp ─────────
+        sarif_path = self._addon_report_via_cp(
+            "sarif-json", "zap-report-sarif", ".sarif"
+        )
+        if sarif_path:
+            generated["SARIF"] = sarif_path
+
+        # ── 5) Markdown — escrito por Python directamente ─────────────────────
+        md_path = self._write_markdown()
+        generated["Markdown"] = md_path
+
+        # ── Tabla de resultados ───────────────────────────────────────────────
+        console.print()
+        t = Table(title="📁 Reportes generados", box=box.ROUNDED,
+                  header_style="bold cyan")
+        t.add_column("Formato", style="bold")
+        t.add_column("Archivo")
+        t.add_column("Tamaño", justify="right")
+        t.add_column("Estado", justify="center")
+
+        all_formats = ["JSON", "HTML", "XML", "SARIF", "Markdown"]
+        for fmt in all_formats:
+            if fmt in generated and generated[fmt].exists():
+                size = generated[fmt].stat().st_size
+                t.add_row(fmt, generated[fmt].name,
+                          f"{max(size // 1024, 1)} KB",
+                          "[bold green]✔ OK[/bold green]")
+            else:
+                t.add_row(fmt, "—", "—", "[red]✘ No generado[/red]")
+        console.print(t)
+
+    def _addon_report_via_cp(self, template: str, basename: str, ext: str) -> Optional[Path]:
+        """
+        Genera reporte con el add-on 'reports', obtiene la ruta interna
+        que devuelve ZAP y la copia al host con 'docker cp'.
+        """
+        if self.no_docker:
+            return None
+        try:
+            # ZAP escribe en /tmp dentro del contenedor (evita problemas de permisos)
             result = self._post("reports/action/generate", {
-                "title":       label,
+                "title":       f"ZAP {template}",
                 "template":    template,
-                "reportDir":   container_report_dir,
-                "reportFile":  base_name,
-                "description": f"DAST Full Scan — {self.target}",
+                "reportDir":   "/tmp",
+                "reportFile":  basename,
+                "description": f"DAST — {self.target}",
                 "contexts":    "FullScan",
             })
+            # ZAP devuelve la ruta absoluta del archivo generado
+            internal = result.get("generate", "")
+            dbg(f"  Ruta interna ZAP ({template}): '{internal}'")
+            if not internal:
+                warn(f"  ZAP no devolvió ruta para {template}")
+                return None
 
-            # ZAP devuelve la ruta absoluta dentro del contenedor
-            internal_path = result.get("generate", "")
-            if not internal_path:
-                return False
-
-            # Copiar desde el contenedor al host
-            dest = report_path / filename
-            cp_result = subprocess.run(
-                ["docker", "cp",
-                 f"zap-fullscan:{internal_path}",
-                 str(dest)],
+            dest = self.report_dir / f"{basename}{ext}"
+            cp = subprocess.run(
+                ["docker", "cp", f"zap-fullscan:{internal}", str(dest)],
                 capture_output=True, text=True
             )
-            if cp_result.returncode == 0 and dest.exists() and dest.stat().st_size > 50:
-                ok(f"  {filename} ({dest.stat().st_size // 1024} KB) [addon+cp]")
-                return True
-            else:
-                return False
-        except Exception:
-            return False
+            if cp.returncode != 0:
+                warn(f"  docker cp falló ({template}): {cp.stderr.strip()}")
+                return None
 
-    # ── FASE 7: Recopilar alertas y generar reportes ──────────────────────────
-    def collect_and_report(self):
-        step(7, 8, "Recopilando alertas y generando reportes")
+            if dest.exists() and dest.stat().st_size > 100:
+                return dest
+            warn(f"  Archivo copiado pero vacío: {dest.name}")
+            return None
+        except Exception as e:
+            warn(f"  Error add-on {template}: {e}")
+            return None
 
-        report_path = self.output_dir / "reports"
-        report_path.mkdir(parents=True, exist_ok=True)
-
-        # ── 7a) Obtener TODAS las alertas via API ────────────────────────────
-        alerts_data = self._get("alert/view/alerts", {
-            "baseurl": self.target,
-            "start":   "0",
-            "count":   "999999",
-        })
-        self.alerts = alerts_data.get("alerts", [])
-        ok(f"Total de alertas encontradas: {len(self.alerts)}")
-
-        # Clasificar por riesgo
-        self.by_risk = {"High": [], "Medium": [], "Low": [], "Informational": []}
-        for alert in self.alerts:
-            risk = alert.get("risk", "Informational")
-            self.by_risk.get(risk, self.by_risk["Informational"]).append(alert)
-
-        info("Generando reportes ...")
-
-        # ── 7b) JSON — siempre funciona (escrito por el script, no ZAP) ─────
-        json_file = report_path / "zap-alerts.json"
-        with open(json_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "scan_info": {
-                    "target":     self.target,
-                    "start_time": self.scan_start.isoformat(),
-                    "end_time":   datetime.now().isoformat(),
-                    "total_urls": getattr(self, "total_urls", 0),
-                    "scanner":    "ZAP 2.17 — github.com/iric-Sauldc",
-                },
-                "summary": {
-                    "total":  len(self.alerts),
-                    "high":   len(self.by_risk["High"]),
-                    "medium": len(self.by_risk["Medium"]),
-                    "low":    len(self.by_risk["Low"]),
-                    "info":   len(self.by_risk["Informational"]),
-                },
-                "alerts": self.alerts,
-            }, f, indent=2, ensure_ascii=False)
-        ok(f"  zap-alerts.json ({json_file.stat().st_size // 1024} KB)")
-
-        # ── 7c) HTML — descarga directa via endpoint HTTP de ZAP ────────────
-        # core/other/htmlreport devuelve el HTML en el body, sin paths Docker
-        html_ok = self._download_report(
-            "core/other/htmlreport",
-            report_path / "zap-report.html"
-        )
-        if not html_ok:
-            # Fallback: add-on reports + docker cp
-            html_ok = self._try_reports_addon(
-                report_path, "traditional-html-plus",
-                "zap-report.html", "ZAP Full Scan HTML"
-            )
-
-        # ── 7d) XML — descarga directa via endpoint HTTP ─────────────────────
-        xml_ok = self._download_report(
-            "core/other/xmlreport",
-            report_path / "zap-report.xml"
-        )
-        if not xml_ok:
-            self._try_reports_addon(
-                report_path, "traditional-xml",
-                "zap-report.xml", "ZAP Full Scan XML"
-            )
-
-        # ── 7e) SARIF — solo disponible via add-on reports + docker cp ───────
-        self._try_reports_addon(
-            report_path, "sarif-json",
-            "zap-report.sarif", "ZAP SARIF"
-        )
-
-        # ── 7f) Markdown custom — escrito por el script directamente ─────────
-        self._generate_markdown_report(report_path)
-
-        # ── 7g) Listar todos los archivos generados ──────────────────────────
-        console.print()
-        files_table = Table(title="📁 Archivos generados", box=box.SIMPLE)
-        files_table.add_column("Archivo",  style="cyan")
-        files_table.add_column("Tamaño",   justify="right")
-        files_table.add_column("Estado",   justify="center")
-        for f in sorted(report_path.iterdir()):
-            size   = f.stat().st_size
-            status = "[green]✔[/green]" if size > 50 else "[red]✘ vacío[/red]"
-            files_table.add_row(f.name, f"{size // 1024} KB", status)
-        console.print(files_table)
-
-    def _generate_markdown_report(self, report_dir: Path):
-        md_file = report_dir / "zap-report.md"
-        elapsed = datetime.now() - self.scan_start
+    def _write_markdown(self) -> Path:
+        md = self.report_dir / "zap-report.md"
+        elapsed = str(datetime.now() - self.scan_start).split(".")[0]
         lines = [
-            f"# 🔒 ZAP Security Report",
-            f"",
+            "# 🔒 ZAP Security Report",
+            "",
             f"| Campo | Valor |",
             f"|-------|-------|",
             f"| **Target** | `{self.target}` |",
             f"| **Fecha** | {self.scan_start.strftime('%Y-%m-%d %H:%M')} |",
-            f"| **Duración** | {str(elapsed).split('.')[0]} |",
-            f"| **URLs descubiertas** | {getattr(self, 'total_urls', 'N/A')} |",
-            f"| **Scanner** | ZAP 2.17 · github.com/iric-Sauldc |",
-            f"",
-            f"## Resumen de Vulnerabilidades",
-            f"",
-            f"| Severidad | Cantidad |",
-            f"|-----------|---------|",
-            f"| 🔴 Alta   | {len(self.by_risk['High'])} |",
-            f"| 🟡 Media  | {len(self.by_risk['Medium'])} |",
-            f"| 🔵 Baja   | {len(self.by_risk['Low'])} |",
-            f"| ⚪ Info   | {len(self.by_risk['Informational'])} |",
+            f"| **Duración** | {elapsed} |",
+            f"| **URLs** | {self.total_urls} |",
+            f"| **Autor** | [iric-Sauldc](https://github.com/iric-Sauldc) |",
+            "",
+            "## Resumen",
+            "",
+            "| Severidad | # |",
+            "|-----------|---|",
+            f"| 🔴 Alta | {len(self.by_risk['High'])} |",
+            f"| 🟡 Media | {len(self.by_risk['Medium'])} |",
+            f"| 🔵 Baja | {len(self.by_risk['Low'])} |",
+            f"| ⚪ Info | {len(self.by_risk['Informational'])} |",
             f"| **Total** | **{len(self.alerts)}** |",
-            f"",
+            "",
         ]
-
-        for risk, color in [("High", "🔴"), ("Medium", "🟡"),
-                             ("Low", "🔵"), ("Informational", "⚪")]:
-            items = self.by_risk[risk]
+        for risk, icon in [("High","🔴"),("Medium","🟡"),("Low","🔵"),("Informational","⚪")]:
+            items = self.by_risk.get(risk, [])
             if not items:
                 continue
-            lines.append(f"## {color} Vulnerabilidades de Severidad {risk}\n")
-            # Deduplicar por nombre
-            seen = {}
+            lines.append(f"## {icon} {risk}\n")
+            seen: dict = {}
             for a in items:
                 name = a.get("name", "Unknown")
                 if name not in seen:
-                    seen[name] = {"count": 0, "urls": [], "alert": a}
+                    seen[name] = {"count": 0, "urls": [], "a": a}
                 seen[name]["count"] += 1
-                url = a.get("url", "")
-                if url not in seen[name]["urls"]:
-                    seen[name]["urls"].append(url)
-
-            for name, data in seen.items():
-                a = data["alert"]
+                u = a.get("url", "")
+                if u and u not in seen[name]["urls"]:
+                    seen[name]["urls"].append(u)
+            for name, d in seen.items():
+                a = d["a"]
                 lines += [
                     f"### {name}",
-                    f"",
-                    f"- **CWE:** {a.get('cweid', 'N/A')}",
-                    f"- **Instancias:** {data['count']}",
-                    f"- **Confianza:** {a.get('confidence', 'N/A')}",
-                    f"- **Descripción:** {a.get('description', '')[:300]}...",
-                    f"- **Solución:** {a.get('solution', '')[:300]}...",
-                    f"- **URLs afectadas:**",
+                    f"- **CWE:** {a.get('cweid','N/A')}  "
+                    f"**Confianza:** {a.get('confidence','N/A')}  "
+                    f"**Instancias:** {d['count']}",
+                    f"- **Descripción:** {a.get('description','')[:300]}",
+                    f"- **Solución:** {a.get('solution','')[:300]}",
                 ]
-                for url in data["urls"][:5]:
-                    lines.append(f"  - `{url}`")
+                for u in d["urls"][:5]:
+                    lines.append(f"  - `{u}`")
                 lines.append("")
+        md.write_text("\n".join(lines), encoding="utf-8")
+        return md
 
-        with open(md_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        ok(f"Reporte Markdown: {md_file}")
-
-    # ── FASE 8: Mostrar resumen en terminal ───────────────────────────────────
-    def print_summary(self):
+    # =========================================================================
+    # FASE 8 — Resumen en terminal
+    # =========================================================================
+    def print_summary(self) -> int:
         step(8, 8, "Resumen final")
-        elapsed = datetime.now() - self.scan_start
+        elapsed = str(datetime.now() - self.scan_start).split(".")[0]
 
-        # Tabla de resultados
-        table = Table(
-            title="🔍 Resultados del Escaneo ZAP",
-            box=box.ROUNDED,
-            show_header=True,
-            header_style="bold cyan",
-        )
-        table.add_column("Severidad",  style="bold",   width=15)
-        table.add_column("Cantidad",   justify="right", width=10)
-        table.add_column("Vulnerabilidades encontradas", width=50)
+        t = Table(title="🔍 Resultados", box=box.ROUNDED, header_style="bold cyan")
+        t.add_column("Severidad", style="bold", width=14)
+        t.add_column("Cantidad", justify="right", width=9)
+        t.add_column("Ejemplos", width=55)
 
-        risk_config = [
+        for label, risk, color in [
             ("🔴 Alta",  "High",          "red"),
             ("🟡 Media", "Medium",        "yellow"),
             ("🔵 Baja",  "Low",           "cyan"),
             ("⚪ Info",  "Informational", "dim"),
-        ]
-        for label, risk, color in risk_config:
-            items = self.by_risk[risk]
-            unique = list({a.get("name", "") for a in items})[:3]
-            names  = ", ".join(unique) + ("..." if len(unique) >= 3 else "")
-            table.add_row(
-                Text(label, style=color),
-                Text(str(len(items)), style=f"bold {color}"),
-                names or "—"
-            )
+        ]:
+            items = self.by_risk.get(risk, [])
+            names = list({a.get("name","") for a in items})[:3]
+            t.add_row(Text(label, style=color),
+                      Text(str(len(items)), style=f"bold {color}"),
+                      ", ".join(names) + ("..." if len(names)==3 else ""))
+        t.add_section()
+        t.add_row("[bold]TOTAL[/bold]", f"[bold]{len(self.alerts)}[/bold]",
+                  f"URLs escaneadas: {self.total_urls}")
+        console.print(); console.print(t)
 
-        table.add_section()
-        table.add_row(
-            "[bold]TOTAL[/bold]",
-            f"[bold]{len(self.alerts)}[/bold]",
-            f"URLs escaneadas: {getattr(self, 'total_urls', 'N/A')}"
+        high = len(self.by_risk.get("High", []))
+        color, icon, msg = (
+            ("green", "✅", "Sin vulnerabilidades críticas") if high == 0 else
+            ("yellow", "⚠️ ", f"{high} vulnerabilidades ALTAS — revisar") if high <= 3 else
+            ("red", "🚨", f"{high} vulnerabilidades ALTAS — acción inmediata")
         )
-
-        console.print()
-        console.print(table)
-
-        # Panel de estado
-        high_count = len(self.by_risk["High"])
-        if high_count == 0:
-            status_color = "green"
-            status_icon  = "✅"
-            status_msg   = "Sin vulnerabilidades críticas encontradas"
-        elif high_count <= 3:
-            status_color = "yellow"
-            status_icon  = "⚠️ "
-            status_msg   = f"{high_count} vulnerabilidades ALTAS — requieren atención"
-        else:
-            status_color = "red"
-            status_icon  = "🚨"
-            status_msg   = f"{high_count} vulnerabilidades ALTAS — acción inmediata requerida"
-
+        keep_note = "\n[dim]El contenedor ZAP sigue corriendo (--keep activo)[/dim]" if self.keep else ""
         console.print(Panel(
-            f"{status_icon}  {status_msg}\n\n"
-            f"[dim]Duración: {str(elapsed).split('.')[0]}  |  "
-            f"Reportes en: {self.output_dir / 'reports'}[/dim]",
+            f"{icon}  {msg}\n"
+            f"[dim]Duración: {elapsed}  |  Reportes: {self.report_dir}[/dim]{keep_note}",
             title="[bold]Estado de Seguridad[/bold]",
-            border_style=status_color,
-            padding=(1, 4),
+            border_style=color, padding=(1, 4),
         ))
+        return 1 if high > 0 else 0
 
-        # Exit code para CI/CD
-        return 1 if high_count > 0 else 0
-
-    # ── Limpieza ──────────────────────────────────────────────────────────────
+    # =========================================================================
+    # Limpieza — respeta --keep
+    # =========================================================================
     def cleanup(self):
         if self.container_id and not self.no_docker:
-            info("Deteniendo contenedor ZAP ...")
-            subprocess.run(
-                ["docker", "rm", "-f", "zap-fullscan"],
-                capture_output=True
-            )
-            ok("Contenedor eliminado")
+            if self.keep:
+                console.print()
+                info(f"Contenedor ZAP mantenido: [bold]zap-fullscan[/bold]")
+                info(f"  Para detenerlo: [bold cyan]docker rm -f zap-fullscan[/bold cyan]")
+                info(f"  Para acceder:   [bold cyan]docker exec -it zap-fullscan bash[/bold cyan]")
+            else:
+                info("Deteniendo contenedor ZAP ...")
+                subprocess.run(["docker", "rm", "-f", "zap-fullscan"], capture_output=True)
+                ok("Contenedor eliminado")
 
-    # ── Orquestador principal ─────────────────────────────────────────────────
+    # =========================================================================
+    # Orquestador
+    # =========================================================================
     def run(self) -> int:
         console.print(f"[bold green]{BANNER}[/bold green]")
         console.print(Panel(
-            f"[bold]Target:[/bold] {self.target}\n"
-            f"[bold]Login:[/bold]  {self.login_url}\n"
-            f"[bold]User:[/bold]   {self.username or 'No autenticado'}\n"
-            f"[bold]Output:[/bold] {self.output_dir}",
-            title="⚙️  Configuración del escaneo",
-            border_style="cyan"
+            f"[bold]Target:[/bold]  {self.target}\n"
+            f"[bold]Login:[/bold]   {self.login_url}\n"
+            f"[bold]User:[/bold]    {self.username or 'No autenticado'}\n"
+            f"[bold]Output:[/bold]  {self.report_dir}\n"
+            f"[bold]Timeout:[/bold] {self.timeout_min} min  "
+            f"[bold]Keep:[/bold] {'Sí' if self.keep else 'No'}",
+            title="⚙️  Configuración",
+            border_style="cyan",
         ))
-
         exit_code = 0
         try:
             self.prepare()
@@ -890,63 +744,61 @@ class ZAPFullScanner:
             self.collect_and_report()
             exit_code = self.print_summary()
         except KeyboardInterrupt:
-            warn("\nEscaneo interrumpido por el usuario")
+            warn("\nInterrumpido por el usuario")
             exit_code = 130
         except Exception as e:
             err(f"Error fatal: {e}")
-            import traceback
             console.print_exception()
             exit_code = 1
         finally:
             self.cleanup()
-
         return exit_code
 
 
 # =============================================================================
-#  CLI
+# CLI
 # =============================================================================
 def parse_args():
     p = argparse.ArgumentParser(
-        description="ZAP Full Scan Automation — github.com/iric-Sauldc",
+        description="ZAP Full Scan Automation v3.0 — github.com/iric-Sauldc",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  # Escaneo básico sin autenticación
+  # Básico (sin auth)
   python3 zap_fullscan.py --target https://staging.miapp.com
 
-  # Escaneo completo con autenticación
+  # Completo con auth + mantener contenedor
   python3 zap_fullscan.py \\
     --target   https://staging.miapp.com \\
     --login    https://staging.miapp.com/login \\
     --user     admin@miapp.com \\
     --password "MiPass123" \\
-    --openapi  ./docs/openapi.yaml \\
-    --output   ./reports \\
-    --timeout  120
+    --output   ./mis-reportes \\
+    --timeout  120 \\
+    --keep
 
-  # Con ZAP ya corriendo (sin Docker)
+  # ZAP ya corriendo (sin Docker)
   python3 zap_fullscan.py --target https://miapp.com --no-docker
         """
     )
-    p.add_argument("--target",    required=True,           help="URL objetivo del escaneo")
-    p.add_argument("--login",     default=None,            help="URL de la página de login")
-    p.add_argument("--user",      default=None,            help="Usuario para autenticación")
-    p.add_argument("--password",  default=None,            help="Contraseña para autenticación")
-    p.add_argument("--openapi",   default=None,            help="Ruta al archivo OpenAPI/Swagger")
-    p.add_argument("--output",    default="./zap-reports", help="Directorio de salida de reportes")
-    p.add_argument("--timeout",   type=int, default=90,    help="Timeout del escaneo activo en minutos")
-    p.add_argument("--threads",   type=int, default=4,     help="Hilos paralelos del scanner")
-    p.add_argument("--zap-host",  default="localhost",     help="Host donde corre ZAP")
-    p.add_argument("--no-docker", action="store_true",     help="No usar Docker (ZAP ya corriendo)")
+    p.add_argument("--target",    required=True)
+    p.add_argument("--login",     default=None)
+    p.add_argument("--user",      default=None)
+    p.add_argument("--password",  default=None)
+    p.add_argument("--openapi",   default=None)
+    p.add_argument("--output",    default="./zap-reports")
+    p.add_argument("--timeout",   type=int, default=90)
+    p.add_argument("--threads",   type=int, default=4)
+    p.add_argument("--zap-host",  default="localhost")
+    p.add_argument("--no-docker", action="store_true",
+                   help="ZAP ya está corriendo, no usar Docker")
+    p.add_argument("--keep",      action="store_true",
+                   help="NO borrar el contenedor Docker al finalizar")
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    # Suprimir warnings de SSL (entornos de prueba con cert autofirmado)
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    args   = parse_args()
-    scanner = ZAPFullScanner(args)
-    sys.exit(scanner.run())
+    args = parse_args()
+    sys.exit(ZAPScanner(args).run())
